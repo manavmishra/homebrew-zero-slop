@@ -1,0 +1,31 @@
+name: Test Homebrew formula
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  formula:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      HOMEBREW_NO_ANALYTICS: "1"
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      ZERO_SLOP_NO_NOTES: "1"
+      ZS_NO_UPDATE_CHECK: "1"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Prepare a runner-local tap from this exact checkout
+        run: |
+          brew tap-new --no-git manavmishra/zero-slop
+          tap_path="$(brew --repo manavmishra/zero-slop)"
+          install -m 644 Formula/zero-slop.rb "$tap_path/Formula/zero-slop.rb"
+      - name: Audit
+        run: brew audit --strict manavmishra/zero-slop/zero-slop
+      - name: Install
+        run: brew install --build-from-source manavmishra/zero-slop/zero-slop
+      - name: Test installed version, offline scorer and skill installation
+        run: brew test manavmishra/zero-slop/zero-slop
