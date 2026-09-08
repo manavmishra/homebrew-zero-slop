@@ -1,0 +1,95 @@
+name: Sync tested Zero Slop release
+
+on:
+  schedule:
+    - cron: "32 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: sync-zero-slop-release
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    env:
+      HOMEBREW_NO_ANALYTICS: "1"
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      ZERO_SLOP_NO_NOTES: "1"
+      ZS_NO_UPDATE_CHECK: "1"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: main
+      - name: Resolve the published stable release to an immutable commit
+        id: release
+        run: |
+          set -euo pipefail
+          tag=$(gh api repos/manavmishra/ZeroSlop/releases/latest --jq 'select(.draft == false and .prerelease == false) | .tag_name')
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          sha=$(gh api "repos/manavmishra/ZeroSlop/commits/$tag" --jq .sha)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: manavmishra/ZeroSlop
+          ref: ${{ steps.release.outputs.sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Generate only from the validated tag and integrity-checked npm package
+        id: formula
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          set -euo pipefail
+          python3 source/.github/scripts/publication_guard.py --tag "$RELEASE_TAG" --sha "$RELEASE_SHA"
+          version="${RELEASE_TAG#v}"
+          test "$(npm view "zero-slop@$version" gitHead)" = "$RELEASE_SHA"
+          node source/distribution/homebrew/prepare-formula.mjs "$RUNNER_TEMP/zero-slop-next.rb"
+          if cmp -s Formula/zero-slop.rb "$RUNNER_TEMP/zero-slop-next.rb"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            install -m 644 "$RUNNER_TEMP/zero-slop-next.rb" Formula/zero-slop.rb
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Prepare the exact new formula for its acceptance test
+        if: steps.formula.outputs.changed == 'true'
+        run: |
+          brew tap-new --no-git manavmishra/zero-slop
+          tap_path="$(brew --repo manavmishra/zero-slop)"
+          install -m 644 Formula/zero-slop.rb "$tap_path/Formula/zero-slop.rb"
+      - name: Audit, install and test before committing
+        if: steps.formula.outputs.changed == 'true'
+        run: |
+          brew audit --strict manavmishra/zero-slop/zero-slop
+          brew install --build-from-source manavmishra/zero-slop/zero-slop
+          brew test manavmishra/zero-slop/zero-slop
+      - name: Recheck release identity and commit only the tested formula
+        if: steps.formula.outputs.changed == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          set -euo pipefail
+          python3 source/.github/scripts/publication_guard.py --tag "$RELEASE_TAG" --sha "$RELEASE_SHA"
+          test "$(gh api repos/manavmishra/ZeroSlop/releases/latest --jq .tag_name)" = "$RELEASE_TAG"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/zero-slop.rb
+          git commit -m "Sync tested Zero Slop $RELEASE_TAG formula"
+          git push origin HEAD:main
