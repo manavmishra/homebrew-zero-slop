@@ -1,8 +1,8 @@
 class ZeroSlop < Formula
   desc "Edit drafts through MCP, score writing locally, and install the skill"
   homepage "https://zero-slop.ai"
-  url "https://registry.npmjs.org/zero-slop/-/zero-slop-2.12.28.tgz"
-  sha256 "6457674aff6c7779694a3a3a05d663fd30bde48dd4e32a5aae8c3977f3492264"
+  url "https://registry.npmjs.org/zero-slop/-/zero-slop-2.12.29.tgz"
+  sha256 "84b194e98bf4d88456301d43690c728d1b23edd7a9fead33ee4318577200f813"
   license "MIT"
 
   depends_on "node"
