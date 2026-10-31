@@ -71,6 +71,7 @@ jobs:
         if: steps.formula.outputs.changed == 'true'
         run: |
           brew tap-new --no-git manavmishra/zero-slop
+          brew trust manavmishra/zero-slop
           tap_path="$(brew --repo manavmishra/zero-slop)"
           install -m 644 Formula/zero-slop.rb "$tap_path/Formula/zero-slop.rb"
       - name: Audit, install and test before committing
