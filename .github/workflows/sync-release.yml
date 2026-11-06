@@ -6,28 +6,29 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write
+  contents: read
   actions: read
 
 concurrency:
-  group: sync-zero-slop-release
+  group: sync-zero-slop-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  sync:
-    runs-on: macos-latest
-    timeout-minutes: 25
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      release_sha: ${{ steps.release.outputs.sha }}
+      tap_sha: ${{ steps.formula.outputs.tap_sha }}
+      candidate: ${{ steps.formula.outputs.candidate }}
     env:
-      HOMEBREW_NO_ANALYTICS: "1"
-      HOMEBREW_NO_AUTO_UPDATE: "1"
-      HOMEBREW_NO_INSTALL_CLEANUP: "1"
-      ZERO_SLOP_NO_NOTES: "1"
-      ZS_NO_UPDATE_CHECK: "1"
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: main
+          persist-credentials: false
       - name: Resolve the published stable release to an immutable commit
         id: release
         run: |
@@ -62,31 +63,66 @@ jobs:
           test "$(npm view "zero-slop@$version" gitHead)" = "$RELEASE_SHA"
           node source/distribution/homebrew/prepare-formula.mjs "$RUNNER_TEMP/zero-slop-next.rb"
           if cmp -s Formula/zero-slop.rb "$RUNNER_TEMP/zero-slop-next.rb"; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "The tap already contains the tested release formula."
           else
-            install -m 644 "$RUNNER_TEMP/zero-slop-next.rb" Formula/zero-slop.rb
-            echo "changed=true" >> "$GITHUB_OUTPUT"
+            # Pass the exact candidate bytes and tap revision to the macOS job.
+            echo "tap_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            candidate=$(base64 -w 0 "$RUNNER_TEMP/zero-slop-next.rb")
+            echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
           fi
+
+  sync:
+    needs: prepare
+    if: github.ref == 'refs/heads/main' && needs.prepare.outputs.candidate != ''
+    runs-on: macos-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      actions: read
+    env:
+      HOMEBREW_NO_ANALYTICS: "1"
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      ZERO_SLOP_NO_NOTES: "1"
+      ZS_NO_UPDATE_CHECK: "1"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.prepare.outputs.tap_sha }}
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: manavmishra/ZeroSlop
+          ref: ${{ needs.prepare.outputs.release_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
       - name: Prepare the exact new formula for its acceptance test
-        if: steps.formula.outputs.changed == 'true'
+        env:
+          FORMULA_CANDIDATE: ${{ needs.prepare.outputs.candidate }}
         run: |
+          set -euo pipefail
+          printf '%s' "$FORMULA_CANDIDATE" | base64 --decode > Formula/zero-slop.rb
           brew tap-new --no-git manavmishra/zero-slop
           brew trust manavmishra/zero-slop
           tap_path="$(brew --repo manavmishra/zero-slop)"
           install -m 644 Formula/zero-slop.rb "$tap_path/Formula/zero-slop.rb"
       - name: Audit, install and test before committing
-        if: steps.formula.outputs.changed == 'true'
         run: |
+          set -euo pipefail
           brew audit --strict manavmishra/zero-slop/zero-slop
           brew install --build-from-source manavmishra/zero-slop/zero-slop
           brew test manavmishra/zero-slop/zero-slop
       - name: Recheck release identity and commit only the tested formula
-        if: steps.formula.outputs.changed == 'true'
         env:
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
         run: |
           set -euo pipefail
+          tap_path="$(brew --repo manavmishra/zero-slop)"
+          cmp Formula/zero-slop.rb "$tap_path/Formula/zero-slop.rb"
           python3 source/.github/scripts/publication_guard.py --tag "$RELEASE_TAG" --sha "$RELEASE_SHA"
           test "$(gh api repos/manavmishra/ZeroSlop/releases/latest --jq .tag_name)" = "$RELEASE_TAG"
           git config user.name "github-actions[bot]"
